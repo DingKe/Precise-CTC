@@ -10,7 +10,7 @@ CTC in different implementations
     2) batch / mask supported.  
     3) speed comparable with (~35% slower than) the numba implementation which is the fastest by now.  
     
- A longer explanation why I "reinvent the wheel": 
+ A longer explanation why I "reinvent the wheel":  
      CTC plays a key role in LSTM-RNN training, with its power we can be liberated from the cumbersome segmentation /
  alignment task. By the time of this publication, there're already plenty of theano implementations of CTC all over the
  web. However, during my offline handwriting recognition research work with RNN, I sadly found that with these open-sourced
