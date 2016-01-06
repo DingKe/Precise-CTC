@@ -12,6 +12,7 @@
 #              3) pre-allocate memory for list can bring ~10 times acceleration for pure python version
 # ----------------------------------------------------------------------------------------------------------------------
 __author__ = 'dawei.leng'
+__version__ = '1.10'
 import numpy as np
 from numba import jit
 
