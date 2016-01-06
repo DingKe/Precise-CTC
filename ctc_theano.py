@@ -21,7 +21,7 @@ __version__ = '1.20'
     It took me days to read the papers, understand the algorithm and try to re-implement it on my own. Finally the culprit
  is caught. The problem rise from how the numerical normalization is done. The CTC algorithm calculates with probability
  values, which are (much) less than 1.0. This will incur underflow along the dynamic programming recursion. In [2] it's
- recommended by Alex Graves [2] to do the calculation in log scale by
+ recommended by Alex Graves to do the calculation in log scale by
                                         ln(a + b) = lna + ln(1 + exp(lnb-lna))
  Adversely, this log scale calculation can occasionally cause numerical overflow, and this's why the above mentioned CTC
  implementations failed to compute the right path probability. The solution is to use time step rescaling method as in [3]
