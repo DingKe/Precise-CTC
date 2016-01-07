@@ -23,7 +23,8 @@ recommended by Alex Graves to do the calculation in log scale by
 Adversely, this log scale calculation can occasionally cause numerical overflow, and this's why the above mentioned CTC
 implementations failed to compute the right path probability. The solution is to use time step rescaling method as in [3]
 instead of log scale calculation. The forward / backward variable will be rescaled at each time step of the DP recursion
-to prevent numerical underflow. My experiments have verified the effectiveness of this method.  
+to prevent numerical underflow. My experiments have verified the effectiveness of this method. 
+
 One somewhat confusing fact I have to mention is that in Section 7.3.1 of [2], Alex Graves stated "Note that rescaling
 the variables at every timestep is less robust, and can fail for very long sequences". Meanwhile contradictory results
 got from experiments I conducted.  
