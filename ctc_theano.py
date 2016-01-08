@@ -1,6 +1,6 @@
 # coding:utf-8
 __author__ = 'dawei.leng'
-__version__ = '1.20'
+__version__ = '1.22'
 """
 ------------------------------------------------------------------------------------------------------------------------
  Another CTC implemented in theano.
@@ -36,7 +36,7 @@ __version__ = '1.20'
  this CTC theano implementation.
 
  Created   :  12, 10, 2015
- Revised   :   1,  5, 2016
+ Revised   :   1,  8, 2016
  Reference :  [1] Alex Graves, etc., Connectionist temporal classification: labelling unsegmented sequence data with
                   recurrent neural networks, ICML, 2006
               [2] Alex Graves, Supervised sequence labelling with recurrent neural networks, 2014
@@ -52,6 +52,8 @@ from theano import tensor
 from theano.ifelse import ifelse
 floatX = theano.config.floatX
 
+from mytheano_utils import remove_adjdup, remove_value, editdist
+
 class CTC(object):
     """
     Compute CTC cost, using time normalization instead of log scale computation.
@@ -65,16 +67,18 @@ class CTC(object):
     T: time length (maximum time length of a batch)
     """
     @classmethod
-    def cost(self, queryseq, scorematrix, queryseq_mask, scorematrix_mask, blank_symbol):
+    def cost(self, queryseq, scorematrix, queryseq_mask=None, scorematrix_mask=None, blank_symbol=None):
         """
         Compute CTC cost, using only the forward pass
         :param queryseq: (L, B)
         :param scorematrix: (T, C+1, B)
         :param queryseq_mask: (L, B)
         :param scorematrix_mask: (T, B)
-        :param blank_symbol: scalar
+        :param blank_symbol: scalar, = C by default
         :return: negative log likelihood averaged over a batch
         """
+        if blank_symbol is None:
+            blank_symbol = scorematrix.shape[1] - 1
         queryseq_padded, queryseq_mask_padded = self._pad_blanks(queryseq, blank_symbol, queryseq_mask)
         results = self.path_probability(queryseq_padded, scorematrix, queryseq_mask_padded, scorematrix_mask, blank_symbol)
         NLL = -results[1][-1]                                             # negative log likelihood
@@ -82,16 +86,19 @@ class CTC(object):
         return NLL_avg
 
     @classmethod
-    def path_probability(self, queryseq_padded, scorematrix, queryseq_mask_padded, scorematrix_mask, blank_symbol):
+    def path_probability(self, queryseq_padded, scorematrix, queryseq_mask_padded=None, scorematrix_mask=None, blank_symbol=None):
         """
         Compute p(l|x) using only the forward variable
         :param queryseq_padded: (2L+1, B)
         :param scorematrix: (T, C+1, B)
         :param queryseq_mask_padded: (2L+1, B)
         :param scorematrix_mask: (T, B)
-        :param blank_symbol: = C
+        :param blank_symbol: = C by default
         :return:
         """
+        if blank_symbol is None:
+            blank_symbol = scorematrix.shape[1] - 1
+
         pred_y = self._class_batch_to_labeling_batch(queryseq_padded, scorematrix, scorematrix_mask)  # (T, 2L+1, B), reshaped scorematrix
 
         r2, r3 = self._recurrence_relation(queryseq_padded, queryseq_mask_padded, blank_symbol)       # r2 (2L+1, 2L+1), r3 (2L+1, 2L+1, B)
@@ -100,7 +107,9 @@ class CTC(object):
                                                                                                       # p_curr = one column of scorematrix
             dotproduct = (p_prev + tensor.dot(p_prev, r2) +                                           # tensor.dot(p_prev, r2) = alpha(t-1, u-1)
                           (p_prev.dimshuffle(1, 'x', 0) * r3).sum(axis=0).T)                          # = alpha(t-1, u-2) conditionally
-            p_curr = p_curr.T * dotproduct * queryseq_mask_padded.T                                   # (B, 2L+1) * (B, 2L+1) * (B, 2L+1) = (B, 2L+1)
+            p_curr = p_curr.T * dotproduct
+            if queryseq_mask_padded is not None:
+                p_curr *= queryseq_mask_padded.T                                                      # (B, 2L+1) * (B, 2L+1) * (B, 2L+1) = (B, 2L+1)
             start = tensor.max([0, queryseq_padded.shape[0] - 2 * countdown])
             mask = tensor.concatenate([tensor.zeros([queryseq_padded.shape[1], start]),
                                        tensor.ones([queryseq_padded.shape[1], queryseq_padded.shape[0] - start])], axis=1)
@@ -117,6 +126,75 @@ class CTC(object):
                 outputs_info=[tensor.eye(queryseq_padded.shape[0])[0] * tensor.ones(queryseq_padded.T.shape),
                               tensor.unbroadcast(tensor.zeros([queryseq_padded.shape[1], 1]), 1), scorematrix.shape[0]])
         return results
+
+    @classmethod
+    def best_path_decode(self, scorematrix, scorematrix_mask=None, blank_symbol=None):
+        """
+        Computes the best path by simply choosing most likely label at each timestep
+        :param scorematrix: (T, C+1, B)
+        :param scorematrix_mask: (T, B)
+        :param blank_symbol: = C by default
+        :return: resultseq (T, B), resultseq_mask(T, B)
+        Speed much slower than pure python version (normally ~40 times on HTR tasks)
+        """
+        bestlabels = tensor.argmax(scorematrix, axis=1)    # (T, B)
+        T, Cp, B = scorematrix.shape
+        resultseq, resultseq_mask = tensor.zeros([T, B])-1, tensor.zeros([T, B])
+        if blank_symbol is None:
+            blank_symbol = Cp - 1
+        if scorematrix_mask is None:
+            scorematrix_mask = tensor.ones([T, B])
+
+        def step(labelseq, labelseq_mask, idx, resultseq, resultseq_mask, blank_symbol):
+            seqlen = tensor.cast(labelseq_mask.sum(), 'int32')
+            labelseq = remove_adjdup(labelseq[0:seqlen])
+            labelseq = remove_value(labelseq, blank_symbol)
+            seqlen2 = labelseq.size
+            resultseq = tensor.set_subtensor(resultseq[0:seqlen2, idx], labelseq)
+            resultseq_mask = tensor.set_subtensor(resultseq_mask[0:seqlen2, idx], tensor.ones_like(labelseq))
+            idx += 1
+            return idx, resultseq, resultseq_mask
+
+        outputs, updates = theano.scan(fn = step,
+                                       sequences=[bestlabels.T, scorematrix_mask.T],
+                                       outputs_info=[0, resultseq, resultseq_mask],
+                                       non_sequences=[blank_symbol],
+                                       name='decode_scan')
+        resultseq, resultseq_mask = outputs[1][-1], outputs[2][-1]
+        return resultseq, resultseq_mask
+
+    @classmethod
+    def calc_CER(self, resultseq, targetseq, resultseq_mask=None, targetseq_mask=None):
+        """
+        Calculate the character error rate (CER) given ground truth 'targetseq' and CTC decoding output 'resultseq'
+        :param resultseq (T1,  B)
+        :param resultseq_mask (T1, B)
+        :param targetseq (T2,  B)
+        :param targetseq_mask (T2, B)
+        :return: CER scalar
+        """
+        if resultseq_mask is None:
+            resultseq_mask = tensor.ones_like(resultseq)
+        if targetseq_mask is None:
+            targetseq_mask = tensor.ones_like(targetseq)
+
+        def step(result_seq, target_seq, result_seq_mask, target_seq_mask, TE, TG):
+            L1 = tensor.cast(result_seq_mask.sum(), 'int32')
+            L2 = tensor.cast(target_seq_mask.sum(), 'int32')
+            d = editdist(result_seq[0:L1], target_seq[0:L2])
+            TE += d
+            TG += target_seq_mask.sum()
+            return TE, TG
+
+        TE, TG = tensor.as_tensor_variable(0.0), tensor.as_tensor_variable(0.0)
+        TE, TG = tensor.cast(TE, 'float64'), tensor.cast(TG, 'float64')
+        outputs, updates = theano.scan(fn=step,
+                                       sequences=[resultseq.T, targetseq.T, resultseq_mask.T, targetseq_mask.T],
+                                       outputs_info=[TE, TG],
+                                       name='calc_CER')
+        TE, TG = outputs[0][-1], outputs[1][-1]
+        CER = TE/TG
+        return CER
 
     @staticmethod
     def _pad_blanks(queryseq, blank_symbol, queryseq_mask=None):
@@ -154,13 +232,14 @@ class CTC(object):
         :param scorematrix_mask: (T, B)
         :return: (T, 2L+1, B)
         """
-        scorematrix = scorematrix * scorematrix_mask.dimshuffle(0, 'x', 1)                   # (T, C+1, B) * (T, 1, B)
+        if scorematrix_mask is not None:
+            scorematrix = scorematrix * scorematrix_mask.dimshuffle(0, 'x', 1)                   # (T, C+1, B) * (T, 1, B)
         batch_size = scorematrix.shape[2]  # = B
-        res = scorematrix[:, queryseq_padded.astype('int32'), tensor.arange(batch_size)]     # (T, 2L+1, B), indexing each row of scorematrix with queryseq_padded
+        res = scorematrix[:, queryseq_padded.astype('int32'), tensor.arange(batch_size)]         # (T, 2L+1, B), indexing each row of scorematrix with queryseq_padded
         return res
 
     @staticmethod
-    def _recurrence_relation(queryseq_padded, queryseq_mask_padded, blank_symbol):
+    def _recurrence_relation(queryseq_padded, queryseq_mask_padded=None, blank_symbol=None):
         """
         Generate structured matrix r2 & r3 for dynamic programming recurrence
         :param queryseq_padded: (2L+1, B)
@@ -168,12 +247,14 @@ class CTC(object):
         :param blank_symbol: = C
         :return: r2 (2L+1, 2L+1), r3 (2L+1, 2L+1, B)
         """
-        L2 = queryseq_padded.shape[0]                                                        # = 2L+1
-        blanks = tensor.zeros((2, queryseq_padded.shape[1])) + blank_symbol                  # (2, B)
-        ybb = tensor.concatenate((queryseq_padded, blanks), axis=0).T                        # (2L+3, B) -> (B, 2L+3)
-        sec_diag = tensor.neq(ybb[:, :-2], ybb[:, 2:]) * tensor.eq(ybb[:, 1:-1], blank_symbol) * queryseq_mask_padded.T  # (B, 2L+1)
-        r2 = tensor.eye(L2, k=1)                                                             # upper diagonal matrix (2L+1, 2L+1)
-        r3 = tensor.eye(L2, k=2).dimshuffle(0, 1, 'x') * sec_diag.dimshuffle(1, 'x', 0)      # (2L+1, 2L+1, B)
+        L2 = queryseq_padded.shape[0]                                                           # = 2L+1
+        blanks = tensor.zeros((2, queryseq_padded.shape[1])) + blank_symbol                     # (2, B)
+        ybb = tensor.concatenate((queryseq_padded, blanks), axis=0).T                           # (2L+3, B) -> (B, 2L+3)
+        sec_diag = tensor.neq(ybb[:, :-2], ybb[:, 2:]) * tensor.eq(ybb[:, 1:-1], blank_symbol)  # (B, 2L+1)
+        if queryseq_mask_padded is not None:
+            sec_diag *= queryseq_mask_padded.T
+        r2 = tensor.eye(L2, k=1)                                                                # upper diagonal matrix (2L+1, 2L+1)
+        r3 = tensor.eye(L2, k=2).dimshuffle(0, 1, 'x') * sec_diag.dimshuffle(1, 'x', 0)         # (2L+1, 2L+1, B)
         return r2, r3
 
 def ctc_path_probability(scorematrix, queryseq, blank):
@@ -233,3 +314,71 @@ def ctc_path_probability(scorematrix, queryseq, blank):
     NLL, alphas = ifelse(tensor.gt(T, 1), (-results[0][-1], results[1][-1]), (-LLForward, alphas))
     return NLL, alphas
 
+
+if __name__ == '__main__':
+    import numpy as np, time
+    from ctc import best_path_decode
+    # np.random.seed(33)
+    B = 100
+    C = 100
+    L = 10
+    T = 5000
+    x1, x2, x3, x4, x5 = tensor.imatrix(name='queryseq'), \
+                         tensor.tensor3(dtype=floatX, name='scorematrix'), \
+                         tensor.fmatrix(name='queryseq_mask'),\
+                         tensor.fmatrix(name='scorematrix_mask'), \
+                         tensor.iscalar(name='blank_symbol')
+
+    # print('compile CTC.cost() ...', end='')
+    # result = CTC.cost(x1, x2, x3, x4, x5)
+    # f1 = theano.function([x1, x2, x3, x4, x5], result)
+    # print(' done')
+
+    # print('compile CTC.best_path_decode() ...', end='')
+    # result = CTC.best_path_decode(x2)
+    # f2 = theano.function([x2], result, profile=False)
+    # print(' done')
+
+    print('compile CTC.calc_CER() ...', end='')
+    x6 = tensor.imatrix()
+    result = CTC.calc_CER(x1, x6)
+    f3 = theano.function([x1, x6], result, profile=False)
+    print(' done')
+
+    s1 = np.array([1,2,3,4,5,6])
+    s2 = np.array([0,2,3,4,5,7])
+    s1 = s1.reshape([s1.size, 1])
+    s2 = s2.reshape([s2.size, 1])
+    print(f3(s1, s2))
+    # for _ in range(10):
+    #     scorematrix = np.random.randn(B, C+1, T)
+    #
+    #
+    #     time1_0 = time.time()
+    #     yhat = scorematrix.T
+    #     resultseq, resultseq_mask = f2(yhat)
+    #     time1 = time.time() - time1_0
+    #     print(resultseq.shape)
+    #     print(resultseq_mask.shape)
+    #
+    #     time2_0 = time.time()
+    #     resultseq2 = []
+    #     for i in range(B):
+    #         resultseq2.append(best_path_decode(scorematrix[i, :, :]))
+    #     time2 = time.time() - time2_0
+    #
+    #     print('time1 = %0.6f, time2= %0.6f' % (time1, time2))
+    #
+    #     resultL = resultseq_mask.sum(axis=0)
+    #     print(resultL.shape)
+    #     for i in range(B):
+    #         res1 = resultseq[0:resultL[i], i]
+    #         res2 = resultseq2[i]
+    #
+    #         if np.all(res1 == res2):
+    #             pass
+    #             # print('all the same @', i)
+    #         else:
+    #             print('NOT SAME! @', i)
+    #             print(res1)
+    #             print(res2)
