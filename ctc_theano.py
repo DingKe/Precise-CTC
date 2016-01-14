@@ -1,6 +1,6 @@
 # coding:utf-8
 __author__ = 'dawei.leng'
-__version__ = '1.30'
+__version__ = '1.31'
 """
 ------------------------------------------------------------------------------------------------------------------------
  Another CTC implemented in theano.
@@ -203,15 +203,13 @@ class CTC(object):
             TG += target_seq_mask.sum()
             return TE, TG
 
-        TE, TG = tensor.as_tensor_variable(0.0), tensor.as_tensor_variable(0.0)
-        TE, TG = tensor.cast(TE, 'float64'), tensor.cast(TG, 'float64')
         outputs, updates = theano.scan(fn=step,
                                        sequences=[resultseq.T, targetseq.T, resultseq_mask.T, targetseq_mask.T],
-                                       outputs_info=[TE, TG],
+                                       outputs_info=[tensor.zeros(1), tensor.zeros(1)],
                                        name='calc_CER')
         TE, TG = outputs[0][-1], outputs[1][-1]
         CER = TE/TG
-        return CER
+        return CER, TE, TG
 
     @staticmethod
     def _remove_value(x, value):
@@ -256,7 +254,7 @@ class CTC(object):
             return current_row
         source, target = ifelse(tensor.lt(s.shape[0], t.shape[0]), (t, s), (s, t))
         previous_row = tensor.arange(target.size + 1, dtype=theano.config.floatX)
-        result, updates = theano.scan(fn = update, sequences=source, outputs_info=previous_row, name='editdist')
+        result, updates = theano.scan(fn=update, sequences=source, outputs_info=previous_row, name='editdist')
         return result[-1,-1]
 
     @staticmethod
