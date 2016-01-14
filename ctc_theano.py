@@ -1,6 +1,6 @@
 # coding:utf-8
 __author__ = 'dawei.leng'
-__version__ = '1.22'
+__version__ = '1.30'
 """
 ------------------------------------------------------------------------------------------------------------------------
  Another CTC implemented in theano.
@@ -36,7 +36,7 @@ __version__ = '1.22'
  this CTC theano implementation.
 
  Created   :  12, 10, 2015
- Revised   :   1,  8, 2016
+ Revised   :   1, 14, 2016
  Reference :  [1] Alex Graves, etc., Connectionist temporal classification: labelling unsegmented sequence data with
                   recurrent neural networks, ICML, 2006
               [2] Alex Graves, Supervised sequence labelling with recurrent neural networks, 2014
@@ -52,7 +52,7 @@ from theano import tensor
 from theano.ifelse import ifelse
 floatX = theano.config.floatX
 
-from mytheano_utils import remove_adjdup, remove_value, editdist
+# from mytheano_utils import remove_adjdup, remove_value, editdist
 
 class CTC(object):
     """
@@ -98,13 +98,29 @@ class CTC(object):
         """
         if blank_symbol is None:
             blank_symbol = scorematrix.shape[1] - 1
+        if queryseq_mask_padded is None:
+                    queryseq_mask_padded = tensor.ones_like(queryseq_padded, dtype=floatX)
 
         pred_y = self._class_batch_to_labeling_batch(queryseq_padded, scorematrix, scorematrix_mask)  # (T, 2L+1, B), reshaped scorematrix
 
         r2, r3 = self._recurrence_relation(queryseq_padded, queryseq_mask_padded, blank_symbol)       # r2 (2L+1, 2L+1), r3 (2L+1, 2L+1, B)
 
-        def step(p_curr, p_prev, LLForward, countdown):                                               # p_curr (2L+1, B), p_prev (B, 2L+1), LLForward (B, 1)
-                                                                                                      # p_curr = one column of scorematrix
+        def step(p_curr, p_prev, LLForward, countdown, r2, r3, queryseq_mask_padded):
+            """
+            [DV, 1-14-2016]: A very weird problem encountered when integrating this CTC implementation into Keras. Before this revision
+                             there were no input parameters (r2, r3, queryseq_mask_padded) specified, they just referred to the outer scope ones.
+                             However, this will cause the CTC integrated within Keras producing inaccurate loss value, meanwhile when compiled
+                             as a separate function, the returned ctc loss value is accurate anyway. But if with these 3 parameters added as
+                             input, the problem vanished. This took me two days to find this remedy. I suspect this'd be the bug of theano.
+            :param p_curr:     (2L+1, B), one column of scorematrix
+            :param p_prev:     (B, 2L+1)
+            :param LLForward:  (B, 1)
+            :param countdown:  scalar
+            :param r2:
+            :param r3:
+            :param queryseq_mask_padded:
+            :return:
+            """
             dotproduct = (p_prev + tensor.dot(p_prev, r2) +                                           # tensor.dot(p_prev, r2) = alpha(t-1, u-1)
                           (p_prev.dimshuffle(1, 'x', 0) * r3).sum(axis=0).T)                          # = alpha(t-1, u-2) conditionally
             p_curr = p_curr.T * dotproduct
@@ -124,7 +140,8 @@ class CTC(object):
                 step,
                 sequences=[pred_y],                                                                   # scan only work on the first dimension
                 outputs_info=[tensor.eye(queryseq_padded.shape[0])[0] * tensor.ones(queryseq_padded.T.shape),
-                              tensor.unbroadcast(tensor.zeros([queryseq_padded.shape[1], 1]), 1), scorematrix.shape[0]])
+                              tensor.unbroadcast(tensor.zeros([queryseq_padded.shape[1], 1]), 1), scorematrix.shape[0]],
+                non_sequences=[r2, r3, queryseq_mask_padded])
         return results
 
     @classmethod
@@ -147,8 +164,8 @@ class CTC(object):
 
         def step(labelseq, labelseq_mask, idx, resultseq, resultseq_mask, blank_symbol):
             seqlen = tensor.cast(labelseq_mask.sum(), 'int32')
-            labelseq = remove_adjdup(labelseq[0:seqlen])
-            labelseq = remove_value(labelseq, blank_symbol)
+            labelseq = self._remove_adjdup(labelseq[0:seqlen])
+            labelseq = self._remove_value(labelseq, blank_symbol)
             seqlen2 = labelseq.size
             resultseq = tensor.set_subtensor(resultseq[0:seqlen2, idx], labelseq)
             resultseq_mask = tensor.set_subtensor(resultseq_mask[0:seqlen2, idx], tensor.ones_like(labelseq))
@@ -181,7 +198,7 @@ class CTC(object):
         def step(result_seq, target_seq, result_seq_mask, target_seq_mask, TE, TG):
             L1 = tensor.cast(result_seq_mask.sum(), 'int32')
             L2 = tensor.cast(target_seq_mask.sum(), 'int32')
-            d = editdist(result_seq[0:L1], target_seq[0:L2])
+            d = self._editdist(result_seq[0:L1], target_seq[0:L2])
             TE += d
             TG += target_seq_mask.sum()
             return TE, TG
@@ -195,6 +212,52 @@ class CTC(object):
         TE, TG = outputs[0][-1], outputs[1][-1]
         CER = TE/TG
         return CER
+
+    @staticmethod
+    def _remove_value(x, value):
+        """
+        Remove certain valued elements from a vector
+        x: vector (must); value: scalar
+        return a vector with all elements = 'value' removed
+        """
+        return (x - value).nonzero_values() + value
+
+    @staticmethod
+    def _remove_adjdup(x):
+        """
+        Remove adjacent duplicate items of a vector
+        x: vector
+        return a vector with adjacent duplicate items removed, for example [1,2,2,2,3,3,4] -> [1,2,3,4]
+        """
+        def update(x, nondup, idx):
+            nondup = tensor.switch(tensor.eq(nondup[idx], x), nondup, tensor.set_subtensor(nondup[idx + 1], x))  # tensor.switch is much faster than ifelse
+            idx = tensor.switch(tensor.eq(nondup[idx], x), idx, idx + 1)
+            return nondup, idx
+        nondup = x
+        idx = tensor.as_tensor_variable(0)
+        idx = tensor.cast(idx, 'int32')
+        result, updates = theano.scan(fn = update, sequences=x, outputs_info=[nondup, idx], name='remove_adjdup')
+        nondup = result[0][-1]
+        idx = result[1][-1]
+        return nondup[0:idx+1]
+
+    @staticmethod
+    def _editdist(s, t):
+        """
+        Levenshtein's edit distance function
+        :param s: vector, source string
+        :param t: vector, target string
+        :return:  edit distance, scalar
+        """
+        def update(x, previous_row):
+            current_row = previous_row + 1
+            current_row = tensor.set_subtensor(current_row[1:], tensor.minimum(current_row[1:], tensor.add(previous_row[:-1], tensor.neq(target,x))))
+            current_row = tensor.set_subtensor(current_row[1:], tensor.minimum(current_row[1:], current_row[0:-1] + 1))
+            return current_row
+        source, target = ifelse(tensor.lt(s.shape[0], t.shape[0]), (t, s), (s, t))
+        previous_row = tensor.arange(target.size + 1, dtype=theano.config.floatX)
+        result, updates = theano.scan(fn = update, sequences=source, outputs_info=previous_row, name='editdist')
+        return result[-1,-1]
 
     @staticmethod
     def _pad_blanks(queryseq, blank_symbol, queryseq_mask=None):
@@ -346,7 +409,7 @@ if __name__ == '__main__':
     print(' done')
 
     s1 = np.array([1,2,3,4,5,6])
-    s2 = np.array([0,2,3,4,5,7])
+    s2 = np.array([1,2,3,4,5,7])
     s1 = s1.reshape([s1.size, 1])
     s2 = s2.reshape([s2.size, 1])
     print(f3(s1, s2))
