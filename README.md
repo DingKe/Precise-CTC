@@ -1,8 +1,6 @@
-# CTC-implementations
-CTC in different implementations, including cython, numba/python and theano versions.  
-
-All the implementations use time step rescaling instead of log scale calculation, giving accurate path probability p(l|x).
-The theano implementation includes a batch version and a non-batch version. The batch version can be used for LSTM-RNN training.
+# Precise CTC
+CTC implementations producing precise path probability p(l|x).
+Including cython, numba/python and theano versions. The theano implementation includes a batch version and a non-batch version.
 
 ### A longer explanation why I "reinvent the wheel":
 
