@@ -1,6 +1,6 @@
 # coding:utf-8
 __author__ = 'dawei.leng'
-__version__ = '1.31'
+__version__ = '1.35'
 """
 ------------------------------------------------------------------------------------------------------------------------
  Another CTC implemented in theano.
@@ -12,12 +12,12 @@ __version__ = '1.31'
 
  A longer explanation why I "reinvent the wheel":
 
-    CTC plays a key role in LSTM-RNN training, with its power we can be liberated from the cumbersome segmentation /
- alignment task. By the time of this publication, there're already plenty of theano implementations of CTC all over the
- web. However, during my offline handwriting recognition research work with RNN, I sadly found that with these open-sourced
- theano implementations, none of them was able to compute the right path probability p(l|x) [1], though claimed successful
- RNN training's been done. This is really a pain in the ass. I've to get off the chair and dig into the origin of CTC
- algorithm to find out what went wrong.
+    CTC (Connectionist Temporal Classification) plays a key role in LSTM-RNN training, with its power we can be liberated
+ from the cumbersome segmentation / alignment task. By the time of this publication, there're already plenty of theano
+ implementations of CTC all over the web. However, during my offline handwriting recognition research work with RNN,
+ I sadly found that with these open-sourced theano implementations, none of them was able to compute the right path
+ probability p(l|x) [1], though claimed successful RNN training's been done. This is really a pain in the ass. I've to get
+ off the chair and dig into the origin of CTC algorithm to find out what went wrong.
     It took me days to read the papers, understand the algorithm and try to re-implement it on my own. Finally the culprit
  is caught. The problem rise from how the numerical normalization is done. The CTC algorithm calculates with probability
  values, which are (much) less than 1.0. This will incur underflow along the dynamic programming recursion. In [2] it's
@@ -36,7 +36,7 @@ __version__ = '1.31'
  this CTC theano implementation.
 
  Created   :  12, 10, 2015
- Revised   :   1, 14, 2016
+ Revised   :   1, 21, 2016
  Reference :  [1] Alex Graves, etc., Connectionist temporal classification: labelling unsegmented sequence data with
                   recurrent neural networks, ICML, 2006
               [2] Alex Graves, Supervised sequence labelling with recurrent neural networks, 2014
@@ -52,15 +52,19 @@ from theano import tensor
 from theano.ifelse import ifelse
 floatX = theano.config.floatX
 
-# from mytheano_utils import remove_adjdup, remove_value, editdist
-
-class CTC(object):
+class CTC_precise(object):
     """
-    Compute CTC cost, using time normalization instead of log scale computation.
+    Compute CTC cost precisely, using time normalization instead of log scale computation.
     Batch supported.
     To compute the batch cost, use .cost() function below.
     Speed slower than the numba & cython version (~6min vs ~3.9min on word_correction_CTC experiment), much faster than
     the following non-batch version ctc_path_probability().
+
+    Note: this implementation introduces non-differentiable path into theano's computation graph, causing
+    theano's auto-diff to produce problematic gradients and result in very poor convergence performance during training
+    process (~20 epochs required to converge to CER~1%, whereas RNNLIB only needs ~5 epochs on mnist_aug_seq3 experiment)
+    So for RNN training purpose, the 'CTC_for_train' class below would be recommended.
+
     B: BATCH_SIZE
     L: query sequence length (maximum length of a batch)
     C: class number
@@ -116,9 +120,9 @@ class CTC(object):
             :param p_prev:     (B, 2L+1)
             :param LLForward:  (B, 1)
             :param countdown:  scalar
-            :param r2:
-            :param r3:
-            :param queryseq_mask_padded:
+            :param r2:         (2L+1, 2L+1)
+            :param r3:         (2L+1, 2L+1, B)
+            :param queryseq_mask_padded: (2L+1, B)
             :return:
             """
             dotproduct = (p_prev + tensor.dot(p_prev, r2) +                                           # tensor.dot(p_prev, r2) = alpha(t-1, u-1)
@@ -318,6 +322,103 @@ class CTC(object):
         r3 = tensor.eye(L2, k=2).dimshuffle(0, 1, 'x') * sec_diag.dimshuffle(1, 'x', 0)         # (2L+1, 2L+1, B)
         return r2, r3
 
+class CTC_for_train(CTC_precise):
+    """
+    This implementation uses log scale computation, for RNN training purpose only. Batch supported.
+    Note the log scale computation produces seldom imprecise CTC cost (path probability), the reason of this additional
+    implementation is because the above 'CTC_precise' class introduces non-differentiable path into theano's computation
+    graph, causing theano's auto-diff to produce problematic gradients and result in poor convergence performance during
+    training process. Experiments show this log scale implementation results in the most comparable convergence
+    performance to Alex Grave's RNNLIB.
+    [Credits to Mohammad Pezeshki, https://github.com/mohammadpz/CTC-Connectionist-Temporal-Classification]
+    B: BATCH_SIZE
+    L: query sequence length (maximum length of a batch)
+    C: class number
+    T: time length (maximum time length of a batch)
+    """
+    @classmethod
+    def cost(self, queryseq, scorematrix, queryseq_mask=None, scorematrix_mask=None, blank_symbol=None):
+        """
+        Compute CTC cost, using only the forward pass
+        :param queryseq: (L, B)
+        :param scorematrix: (T, C+1, B)
+        :param queryseq_mask: (L, B)
+        :param scorematrix_mask: (T, B)
+        :param blank_symbol: scalar, = C by default
+        :return: negative log likelihood averaged over a batch
+        """
+        if blank_symbol is None:
+            blank_symbol = scorematrix.shape[1] - 1
+        queryseq_padded, queryseq_mask_padded = self._pad_blanks(queryseq, blank_symbol, queryseq_mask)
+        NLL, alphas = self.path_probability(queryseq_padded, scorematrix, queryseq_mask_padded, scorematrix_mask, blank_symbol)
+        NLL_avg = tensor.mean(NLL)
+        return NLL_avg
+
+    @classmethod
+    def path_probability(self, queryseq_padded, scorematrix, queryseq_mask_padded=None, scorematrix_mask=None, blank_symbol=None):
+        """
+        Compute p(l|x) using only the forward variable and log scale
+        :param queryseq_padded: (2L+1, B)
+        :param scorematrix: (T, C+1, B)
+        :param queryseq_mask_padded: (2L+1, B)
+        :param scorematrix_mask: (T, B)
+        :param blank_symbol: = C by default
+        :return:
+        """
+        if blank_symbol is None:
+            blank_symbol = scorematrix.shape[1] - 1
+        if queryseq_mask_padded is None:
+            queryseq_mask_padded = tensor.ones_like(queryseq_padded, dtype=floatX)
+        if scorematrix_mask is None:
+            scorematrix_mask = tensor.ones([scorematrix.shape[0], scorematrix.shape[2]])
+
+        pred_y = self._class_batch_to_labeling_batch(queryseq_padded, scorematrix, scorematrix_mask)  # (T, 2L+1, B), reshaped scorematrix
+        r2, r3 = self._recurrence_relation(queryseq_padded, queryseq_mask_padded, blank_symbol)       # r2 (2L+1, 2L+1), r3 (2L+1, 2L+1, B)
+
+        def step(p_curr, p_prev):
+            p1 = p_prev
+            p2 = self._log_dot_matrix(p1, r2)
+            p3 = self._log_dot_tensor(p1, r3)
+            p123 = self._log_add(p3, self._log_add(p1, p2))
+            return p_curr.T + p123 + self._epslog(queryseq_mask_padded.T)
+
+        alphas, _ = theano.scan(
+                step,
+                sequences=[self._epslog(pred_y)],
+                outputs_info=[self._epslog(tensor.eye(queryseq_padded.shape[0])[0] * tensor.ones(queryseq_padded.T.shape))])
+
+        B = alphas.shape[1]
+        TL = tensor.sum(scorematrix_mask, axis=0, dtype='int32')
+        LL = tensor.sum(queryseq_mask_padded, axis=0, dtype='int32')
+        NLL = -self._log_add(alphas[TL - 1, tensor.arange(B), LL - 1],
+                             alphas[TL - 1, tensor.arange(B), LL - 2])
+        return NLL, alphas
+
+    @staticmethod
+    def _epslog(x):
+        return tensor.cast(tensor.log(tensor.clip(x, 1E-12, 1E12)),
+                           theano.config.floatX)
+
+    @staticmethod
+    def _log_add(a, b):
+        max_ = tensor.maximum(a, b)
+        return max_ + tensor.log1p(tensor.exp(a + b - 2 * max_))
+
+    @staticmethod
+    def _log_dot_matrix(x, z):
+        inf = 1E12
+        log_dot = tensor.dot(x, z)
+        zeros_to_minus_inf = (z.max(axis=0) - 1) * inf
+        return log_dot + zeros_to_minus_inf
+
+    @staticmethod
+    def _log_dot_tensor(x, z):
+        inf = 1E12
+        log_dot = (x.dimshuffle(1, 'x', 0) * z).sum(axis=0).T
+        zeros_to_minus_inf = (z.max(axis=0) - 1) * inf
+        return log_dot + zeros_to_minus_inf.T
+
+
 def ctc_path_probability(scorematrix, queryseq, blank):
     """
     Compute path probability based on CTC algorithm, only forward pass is used.
@@ -390,27 +491,35 @@ if __name__ == '__main__':
                          tensor.fmatrix(name='scorematrix_mask'), \
                          tensor.iscalar(name='blank_symbol')
 
-    # print('compile CTC.cost() ...', end='')
-    # result = CTC.cost(x1, x2, x3, x4, x5)
-    # f1 = theano.function([x1, x2, x3, x4, x5], result)
-    # print(' done')
+    print('compile CTC_precise.cost() ...', end='')
+    result = CTC_precise.cost(x1, x2, x3, x4, x5)
+    f1 = theano.function([x1, x2, x3, x4, x5], result)
+    print(' done')
+
+    print('compile CTC_for_train.cost() ...', end='')
+    result = CTC_for_train.cost(x1, x2, x3, x4, x5)
+    f2 = theano.function([x1, x2, x3, x4, x5], result)
+    print(' done')
+
 
     # print('compile CTC.best_path_decode() ...', end='')
     # result = CTC.best_path_decode(x2)
     # f2 = theano.function([x2], result, profile=False)
     # print(' done')
 
-    print('compile CTC.calc_CER() ...', end='')
-    x6 = tensor.imatrix()
-    result = CTC.calc_CER(x1, x6)
-    f3 = theano.function([x1, x6], result, profile=False)
-    print(' done')
 
-    s1 = np.array([1,2,3,4,5,6])
-    s2 = np.array([1,2,3,4,5,7])
-    s1 = s1.reshape([s1.size, 1])
-    s2 = s2.reshape([s2.size, 1])
-    print(f3(s1, s2))
+    # print('compile CTC.calc_CER() ...', end='')
+    # x6 = tensor.imatrix()
+    # result = CTC.calc_CER(x1, x6)
+    # f3 = theano.function([x1, x6], result, profile=False)
+    # print(' done')
+    #
+    # s1 = np.array([1,2,3,4,5,6])
+    # s2 = np.array([1,2,3,4,5,7])
+    # s1 = s1.reshape([s1.size, 1])
+    # s2 = s2.reshape([s2.size, 1])
+    # print(f3(s1, s2))
+
     # for _ in range(10):
     #     scorematrix = np.random.randn(B, C+1, T)
     #
