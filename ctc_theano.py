@@ -1,6 +1,6 @@
 # coding:utf-8
 __author__ = 'dawei.leng'
-__version__ = '1.35'
+__version__ = '1.40'
 """
 ------------------------------------------------------------------------------------------------------------------------
  Another CTC implemented in theano.
@@ -46,6 +46,19 @@ __version__ = '1.35'
               [5] Mohammad Pezeshki, https://github.com/mohammadpz/CTC-Connectionist-Temporal-Classification/blob/master/ctc_cost.py
               [6] Shawn Tan, https://github.com/shawntan/rnn-experiment/blob/master/CTC.ipynb
 ------------------------------------------------------------------------------------------------------------------------
+# How to Use
+## For precise path probability
+    Using CTC_precise.cost() instead of CTC_for_train.cost()
+## For RNN training with Theano
+    According to experiment results, both CTC_precise.cost() and CTC_for_train.cost() can be used for training purpose. Due to
+a bug of theano (issue https://github.com/Theano/Theano/issues/3925), the CTC_for_train class was assumed more suitable for RNN
+training before but then proved not the case. Experiments show that CTC_precise class results in lower residual error, thus should
+be more suitable for training.
+    Thumb rules:
+    * Smaller batch size is more preferable for training, if batch size > 50, the training process may fail to converge due to gradient
+averaging;
+    * Adadelta is better than SGD in most cases;
+    * 'tanh' is a better choise of the output activation of LSTM.
 """
 import theano
 from theano import tensor
@@ -60,10 +73,11 @@ class CTC_precise(object):
     Speed slower than the numba & cython version (~6min vs ~3.9min on word_correction_CTC experiment), much faster than
     the following non-batch version ctc_path_probability().
 
-    Note: this implementation introduces non-differentiable path into theano's computation graph, causing
+    ~~Note: this implementation introduces non-differentiable path into theano's computation graph, causing
     theano's auto-diff to produce problematic gradients and result in very poor convergence performance during training
-    process (~20 epochs required to converge to CER~1%, whereas RNNLIB only needs ~5 epochs on mnist_aug_seq3 experiment)
-    So for RNN training purpose, the 'CTC_for_train' class below would be recommended.
+    process (~20 epochs required to converge to CER~1%, whereas RNNLIB only needs ~5 epochs on mnist_aug_seq3 experiment;
+    dropout greatly helps for quicker convergence)
+    So for RNN training purpose, the 'CTC_for_train' class below would be recommended.~~
 
     B: BATCH_SIZE
     L: query sequence length (maximum length of a batch)
@@ -87,6 +101,11 @@ class CTC_precise(object):
         results = self.path_probability(queryseq_padded, scorematrix, queryseq_mask_padded, scorematrix_mask, blank_symbol)
         NLL = -results[1][-1]                                             # negative log likelihood
         NLL_avg = tensor.mean(NLL)                                        # batch averaged NLL, used as cost
+        # if scorematrix_mask is not None:
+        #     sm = scorematrix * scorematrix_mask.dimshuffle(0, 'x', 1)
+        # else:
+        #     sm = scorematrix
+        # penalty = tensor.log(sm[:, blank_symbol, :].sum())
         return NLL_avg
 
     @classmethod
@@ -325,11 +344,12 @@ class CTC_precise(object):
 class CTC_for_train(CTC_precise):
     """
     This implementation uses log scale computation, for RNN training purpose only. Batch supported.
-    Note the log scale computation produces seldom imprecise CTC cost (path probability), the reason of this additional
-    implementation is because the above 'CTC_precise' class introduces non-differentiable path into theano's computation
-    graph, causing theano's auto-diff to produce problematic gradients and result in poor convergence performance during
-    training process. Experiments show this log scale implementation results in the most comparable convergence
-    performance to Alex Grave's RNNLIB.
+    Note the log scale computation produces seldom imprecise CTC cost (path probability).
+    ~~The reason of this additional implementation is because the above 'CTC_precise' class introduces
+    non-differentiable path into theano's computation graph, causing theano's auto-diff to produce
+    problematic gradients and result in poor convergence performance during training process.
+    Experiments show this log scale implementation results in the most comparable convergence
+    performance to Alex Grave's RNNLIB.~~
     [Credits to Mohammad Pezeshki, https://github.com/mohammadpz/CTC-Connectionist-Temporal-Classification]
     B: BATCH_SIZE
     L: query sequence length (maximum length of a batch)
@@ -347,6 +367,7 @@ class CTC_for_train(CTC_precise):
         :param blank_symbol: scalar, = C by default
         :return: negative log likelihood averaged over a batch
         """
+        print('CTC_for_train.cost is used')
         if blank_symbol is None:
             blank_symbol = scorematrix.shape[1] - 1
         queryseq_padded, queryseq_mask_padded = self._pad_blanks(queryseq, blank_symbol, queryseq_mask)
