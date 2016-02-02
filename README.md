@@ -7,7 +7,7 @@ Including cython, numba/python and theano versions. The theano implementation in
 CTC (Connectionist Temporal Classification) plays a key role in LSTM-RNN training, with its power we can be liberated from the cumbersome segmentation / alignment task. By the time of this publication, there're already plenty of theano implementations of CTC all over the web. However, during my offline handwriting recognition research work with RNN, I sadly found that with these open-sourced theano implementations, none of them was able to compute the right path probability p(l|x) [1], though claimed successful RNN training's been done. This is really a pain in the ass. I've to get off the chair and dig into the origin of CTC algorithm to find out what went wrong.
  
 It took me days to read the papers, understand the algorithm and try to re-implement it on my own. Finally the culprit
-is caught. The problem rise from how the numerical normalization is done. The CTC algorithm calculates with probability
+is caught. The problem rises from how the numerical normalization is done. The CTC algorithm calculates with probability
 values, which are (much) less than 1.0. This will incur underflow along the dynamic programming recursion. In [2] it's
 recommended by Alex Graves to do the calculation in log scale by  
  
