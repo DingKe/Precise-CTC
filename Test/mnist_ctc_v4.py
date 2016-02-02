@@ -82,7 +82,8 @@ if __name__ == '__main__':
     print("model compiling")
     # sgd = SGD(lr=1e-3, decay=0.0, momentum=0.8, nesterov=False)
     # model.compile(loss='ctc_cost_for_train', optimizer='Adadelta', class_mode='ctc', y_truth=y_train2, theano_mode='FAST_RUN', mask=True)
-    model.compile(loss='ctc_cost_for_train', optimizer='Adadelta', class_mode='ctc', theano_mode='FAST_RUN', mask=True)
+    # model.compile(loss='ctc_cost_for_train', optimizer='Adadelta', class_mode='ctc', theano_mode='FAST_RUN', mask=True)
+    model.compile(loss='ctc_cost_precise', optimizer='Adadelta', class_mode='ctc', theano_mode='FAST_RUN', mask=True)
 
     print("model training")
     batch=1
@@ -92,7 +93,9 @@ if __name__ == '__main__':
         LOSS = 0.0
         n = 0
         TE2, TD2 = 0.0, 0.0
-        for i in range(0,B,batch):
+        batches = range(0, B, batch)
+        shuffle = np.random.choice(batches, size=len(batches), replace=False)
+        for i in shuffle:
             ctcloss, cer, te, td, resultseq, resultseq_mask, scorematrixT = model.train_on_batch(
                     X=X_train2[i:i+batch,:,:].reshape([batch,T,D]),
                     y=y_train2[i:i+batch,:].reshape([batch, L]),
