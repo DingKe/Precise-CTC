@@ -1,6 +1,6 @@
 # coding:utf-8
 __author__ = 'dawei.leng'
-__version__ = '1.40'
+__version__ = '1.42'
 """
 ------------------------------------------------------------------------------------------------------------------------
  Another CTC implemented in theano.
@@ -36,7 +36,7 @@ __version__ = '1.40'
  this CTC theano implementation.
 
  Created   :  12, 10, 2015
- Revised   :   1, 21, 2016
+ Revised   :   2,  3, 2016
  Reference :  [1] Alex Graves, etc., Connectionist temporal classification: labelling unsegmented sequence data with
                   recurrent neural networks, ICML, 2006
               [2] Alex Graves, Supervised sequence labelling with recurrent neural networks, 2014
@@ -179,11 +179,11 @@ class CTC_precise(object):
         """
         bestlabels = tensor.argmax(scorematrix, axis=1)    # (T, B)
         T, Cp, B = scorematrix.shape
-        resultseq, resultseq_mask = tensor.zeros([T, B])-1, tensor.zeros([T, B])
+        resultseq, resultseq_mask = tensor.zeros([T, B], dtype=scorematrix.dtype)-1, tensor.zeros([T, B], dtype=scorematrix.dtype)
         if blank_symbol is None:
             blank_symbol = Cp - 1
         if scorematrix_mask is None:
-            scorematrix_mask = tensor.ones([T, B])
+            scorematrix_mask = tensor.ones([T, B], dtype=scorematrix.dtype)
 
         def step(labelseq, labelseq_mask, idx, resultseq, resultseq_mask, blank_symbol):
             seqlen = tensor.cast(labelseq_mask.sum(), 'int32')
