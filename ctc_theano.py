@@ -1,6 +1,6 @@
 # coding:utf-8
 __author__ = 'dawei.leng'
-__version__ = '1.42'
+__version__ = '1.43'
 """
 ------------------------------------------------------------------------------------------------------------------------
  Another CTC implemented in theano.
@@ -46,18 +46,18 @@ __version__ = '1.42'
               [5] Mohammad Pezeshki, https://github.com/mohammadpz/CTC-Connectionist-Temporal-Classification/blob/master/ctc_cost.py
               [6] Shawn Tan, https://github.com/shawntan/rnn-experiment/blob/master/CTC.ipynb
 ------------------------------------------------------------------------------------------------------------------------
-# How to Use
+#  How to Use
 ## For precise path probability
     Using CTC_precise.cost() instead of CTC_for_train.cost()
 ## For RNN training with Theano
-    According to experiment results, both CTC_precise.cost() and CTC_for_train.cost() can be used for training purpose. Due to
-a bug of theano (issue https://github.com/Theano/Theano/issues/3925), the CTC_for_train class was assumed more suitable for RNN
-training before but then proved not the case. Experiments show that CTC_precise class results in lower residual error, thus should
-be more suitable for training.
+    According to experiment results, CTC_precise.cost() results in much better convergence performance than CTC_for_train.cost(),
+check the experiment results "Average CER curves_x.png". Due to a bug of theano (issue https://github.com/Theano/Theano/issues/3925),
+the CTC_for_train class was assumed more suitable for RNN training before but then proved not true. Experiments show that
+CTC_precise class results in lower residual error, thus should be more suitable for training.
     Thumb rules:
     * Smaller batch size is more preferable for training, if batch size > 50, the training process may fail to converge due to gradient
 averaging;
-    * Adadelta is better than SGD in most cases;
+    * Adadelta/RMSProp are better than SGD in most cases;
     * 'tanh' is a better choise of the output activation of LSTM.
 """
 import theano
@@ -72,12 +72,6 @@ class CTC_precise(object):
     To compute the batch cost, use .cost() function below.
     Speed slower than the numba & cython version (~6min vs ~3.9min on word_correction_CTC experiment), much faster than
     the following non-batch version ctc_path_probability().
-
-    ~~Note: this implementation introduces non-differentiable path into theano's computation graph, causing
-    theano's auto-diff to produce problematic gradients and result in very poor convergence performance during training
-    process (~20 epochs required to converge to CER~1%, whereas RNNLIB only needs ~5 epochs on mnist_aug_seq3 experiment;
-    dropout greatly helps for quicker convergence)
-    So for RNN training purpose, the 'CTC_for_train' class below would be recommended.~~
 
     B: BATCH_SIZE
     L: query sequence length (maximum length of a batch)
@@ -343,13 +337,10 @@ class CTC_precise(object):
 
 class CTC_for_train(CTC_precise):
     """
-    This implementation uses log scale computation, for RNN training purpose only. Batch supported.
-    Note the log scale computation produces seldom imprecise CTC cost (path probability).
-    ~~The reason of this additional implementation is because the above 'CTC_precise' class introduces
-    non-differentiable path into theano's computation graph, causing theano's auto-diff to produce
-    problematic gradients and result in poor convergence performance during training process.
-    Experiments show this log scale implementation results in the most comparable convergence
-    performance to Alex Grave's RNNLIB.~~
+    Obsolete.
+    This implementation uses log scale computation, and was assumed more suitable for RNN training, but then proved not true,
+    refer to https://github.com/Theano/Theano/issues/3925 for details.
+    Batch supported. Note the log scale computation produces seldom imprecise CTC cost (path probability).
     [Credits to Mohammad Pezeshki, https://github.com/mohammadpz/CTC-Connectionist-Temporal-Classification]
     B: BATCH_SIZE
     L: query sequence length (maximum length of a batch)
